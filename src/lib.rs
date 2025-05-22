@@ -430,7 +430,28 @@ fn construct_traced_block(
         fn_return_value
     }}
 }
-
+// how interpolation parsing works:
+// we get a format string, we scan until we find a {,
+// once we find a { we check if we find another { right after for just escaping the interpolation
+// if its just a single {, we scan until we find the closing }, then
+// we see if there is any custom formatting options like :? or whatever, and we verify that the
+// ident is bound by the parameters to the function.
+// a side note: the way we format is with indexes ie: format("{0} {1}", foo, bar)
+// too facilitate this we keep to list the arg_idents and the keep_arg_idents
+// arg_idents represent what is initially the list of parameters
+// keep_arg_idents represent the parameters that are actually going to shown, this is how we
+// maintain the order for formatting
+// if it is there are two cases:
+// 1. This parameter is not part of the format string (its in arg_idents)
+//    so we add it to keep_arg_idents, and remove it from arg_idents
+//    we put as the index for this part of the interpolation the length of keep_arg_idents before
+//    adding
+// 2. It's already in keep_arg_idents its already been interpolated once
+//    so we just put as the index the index of the ident from keep_arg_idents
+// if there is any custom formatting information we put that right after the index in the
+// interpolation
+// otherwise if we are not in interpolation we didn't find a { we just add the char to the string
+// we are outputting
 fn parse_fmt_str(
     fmt_str: &str,
     mut arg_idents: Vec<TokenStream>,
@@ -479,12 +500,20 @@ fn fix_interpolated(
             "invalid format string: expected `'}}'` but string was terminated\nif you intended to print `{{`, you can escape it using `{{`.",
         ));
     }
+    // just parsing to colon means we are relying on the format! macro to do the actual custom
+    // formatting stuff
+    let custom_format = ident.split_once(":");
+    let (ident, custom_format) = custom_format.unwrap_or((&ident, ""));
     let predicate = |arg_ident: &TokenStream| arg_ident.to_string() == ident;
+
+    // we always put colon even if there is not custom format string, because we do not have to do
+    // any actual checking for custom format string after splitting on the format string
+    // because format! does allow for dangling colon when there is not format string
     if let Some(index) = kept_arg_idents.iter().position(predicate) {
-        Ok(format!("{{{}}}", index + 1))
+        Ok(format!("{{{}:{}}}", index + 1, custom_format))
     } else if let Some(index) = arg_idents.iter().position(predicate) {
         kept_arg_idents.push(arg_idents.remove(index));
-        Ok(format!("{{{}}}", kept_arg_idents.len()))
+        Ok(format!("{{{}:{}}}", kept_arg_idents.len(), custom_format))
     } else {
         Err(syn::Error::new(
             Span::call_site(),
@@ -517,6 +546,10 @@ fn parse_interpolated(
             }
         }
     }
+    // we do not actually verify that ident is a valid rust ident, because
+    // inf fix_interpolated we will check that has the same string representation as one of the
+    // functions parameters, but if we did this is how we would do it
+    // syn::parse_str::<syn::Ident>(&ident)?;
     fix_interpolated(last_char, ident, arg_idents, kept_arg_idents)
 }
 
